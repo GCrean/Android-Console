@@ -1,0 +1,94 @@
+name: Build installers
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows (NSIS installer)
+            os: windows-latest
+            formats: nsis
+            artifact: windows-x64
+            files: dist/*-setup.exe
+          - name: macOS arm64 (DMG)
+            os: macos-latest
+            formats: dmg
+            artifact: macos-arm64
+            files: dist/*.dmg
+          - name: Linux x64 (deb)
+            os: ubuntu-latest
+            formats: deb
+            artifact: linux-x64
+            files: dist/*.deb
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake pkg-config libssl-dev libasound2-dev libfontconfig-dev \
+            libvulkan-dev libwayland-dev libx11-xcb-dev libxcb-xkb-dev \
+            libxkbcommon-x11-dev libxkbcommon-dev
+
+      - name: Cache cargo-packager
+        id: packager-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-packager${{ runner.os == 'Windows' && '.exe' || '' }}
+          key: cargo-packager-${{ runner.os }}-${{ runner.arch }}-v0.11.8
+
+      - name: Install cargo-packager
+        if: steps.packager-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-packager --version 0.11.8 --locked
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package (${{ matrix.formats }})
+        # CI=true (set by GitHub) makes the DMG step skip its Finder AppleScript.
+        run: cargo packager --release --formats ${{ matrix.formats }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
